@@ -10,49 +10,26 @@ app = typer.Typer()
 
 CONFIG_FILE_NAME = "docu-gen-config.yaml"
 
+# Simplified config for per-project workflow
 DEFAULT_CONFIG = {
-    "projects": [
-        {
-            "name": "User-Service",
-            "path": "/home/varun/repos/project-user-service",
-        },
-        {
-            "name": "Product-API",
-            "path": "/home/varun/repos/project-product-api",
-        },
-        {
-            "name": "Billing-Engine",
-            "path": "/home/varun/repos/project-billing-engine",
-        },
-    ],
-    "output_dir": "./generated_docs",
+    "output_dir": "./docs/api",
 }
 
 def get_config():
-    """Reads the config file."""
+    """Reads the config file from the current directory."""
     config_path = Path(CONFIG_FILE_NAME)
     if not config_path.exists():
-        typer.echo(f"Error: '{CONFIG_FILE_NAME}' not found. Please run 'docu-gen init'.")
+        typer.echo(f"Error: '{CONFIG_FILE_NAME}' not found in the current directory.")
+        typer.echo("Please run 'docu-gen init' to create a configuration file.")
         raise typer.Exit(code=1)
 
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
 
-def get_project_path(project_name: str) -> Path:
-    """Gets the path of a project from the config file."""
-    config = get_config()
-    for project in config.get("projects", []):
-        if project["name"] == project_name:
-            return Path(project["path"])
-
-    typer.echo(f"Error: Project '{project_name}' not found in '{CONFIG_FILE_NAME}'.")
-    raise typer.Exit(code=1)
-
-
 @app.command()
 def init():
     """
-    Initializes a new docu-gen-config.yaml file in the current directory.
+    Initializes a new docu-gen-config.yaml file in the current project directory.
     """
     config_path = Path(CONFIG_FILE_NAME)
     if config_path.exists():
@@ -62,24 +39,26 @@ def init():
     with open(config_path, "w") as f:
         yaml.dump(DEFAULT_CONFIG, f, default_flow_style=False, sort_keys=False)
 
-    typer.echo(f"Successfully created '{CONFIG_FILE_NAME}'.")
+    typer.echo(f"Successfully created '{CONFIG_FILE_NAME}' in the current directory.")
+    typer.echo("You can now run 'docu-gen find-undocumented' or 'docu-gen generate'.")
 
 
 @app.command()
-def find_undocumented(project_name: str):
+def find_undocumented():
     """
-    Finds APIViews without @extend_schema in a project.
+    Finds APIViews without @extend_schema in the current project.
     """
-    project_path = get_project_path(project_name)
-
-    if not project_path.exists() or not project_path.is_dir():
-        typer.echo(f"Error: Project directory not found at '{project_path}'.")
-        raise typer.Exit(code=1)
+    project_path = Path(".")
+    project_name = project_path.resolve().name
 
     typer.echo(f"Scanning '{project_name}' for undocumented APIViews...")
     undocumented_views = []
 
     for root, _, files in os.walk(project_path):
+        # Exclude common virtual environment and git directories
+        if ".venv" in root or "venv" in root or ".git" in root:
+            continue
+
         for file in files:
             if file.endswith(".py"):
                 file_path = Path(root) / file
@@ -90,27 +69,23 @@ def find_undocumented(project_name: str):
 
                         for node in ast.walk(tree):
                             if isinstance(node, ast.ClassDef):
-                                is_api_view = False
-                                for base in node.bases:
-                                    if isinstance(base, ast.Name) and base.id == "APIView":
-                                        is_api_view = True
-                                        break
+                                is_api_view = any(
+                                    isinstance(base, ast.Name) and base.id == "APIView"
+                                    for base in node.bases
+                                )
 
                                 if is_api_view:
-                                    has_extend_schema = False
-                                    for decorator in node.decorator_list:
-                                        if isinstance(decorator, ast.Call) and isinstance(decorator.func, ast.Name) and decorator.func.id == "extend_schema":
-                                            has_extend_schema = True
-                                            break
-                                        elif isinstance(decorator, ast.Name) and decorator.id == "extend_schema":
-                                            has_extend_schema = True
-                                            break
+                                    has_extend_schema = any(
+                                        (isinstance(d, ast.Call) and isinstance(d.func, ast.Name) and d.func.id == "extend_schema")
+                                        or (isinstance(d, ast.Name) and d.id == "extend_schema")
+                                        for d in node.decorator_list
+                                    )
 
                                     if not has_extend_schema:
                                         undocumented_views.append((str(file_path), node.name))
 
                 except Exception as e:
-                    typer.echo(f"Warning: Could not parse {file_path}. Error: {e}")
+                    typer.echo(f"Warning: Could not parse {file_path}. Error: {e}", err=True)
 
     if undocumented_views:
         typer.echo("\nUndocumented APIViews found:")
@@ -123,68 +98,60 @@ def find_undocumented(project_name: str):
 @app.command()
 def generate():
     """
-    Generates OpenAPI schema and Postman collections for all projects.
+    Generates OpenAPI schema and Postman collections for the current project.
     """
     config = get_config()
     output_dir = Path(config.get("output_dir", "./generated_docs"))
-    output_dir.mkdir(exist_ok=True)
 
-    projects = config.get("projects", [])
-    if not projects:
-        typer.echo("No projects found in the configuration file.")
-        raise typer.Exit()
+    project_path = Path(".")
+    project_name = project_path.resolve().name
 
-    typer.echo(f"Generating documentation for {len(projects)} project(s)...")
+    # The final output will be in a subfolder named after the project
+    project_output_dir = output_dir / project_name
+    project_output_dir.mkdir(parents=True, exist_ok=True)
 
-    for project in projects:
-        project_name = project["name"]
-        project_path = Path(project["path"])
-        project_output_dir = output_dir / project_name
-        project_output_dir.mkdir(exist_ok=True)
+    typer.echo(f"Processing project: {project_name}")
 
-        typer.echo(f"\nProcessing project: {project_name}")
+    # Generate OpenAPI schema
+    schema_file = "schema.yml"
+    schema_command = ["python", "manage.py", "spectacular", "--file", schema_file]
 
-        if not project_path.is_dir():
-            typer.echo(f"  - Skipping: Directory not found at '{project_path}'")
-            continue
+    try:
+        subprocess.run(
+            schema_command,
+            cwd=project_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        # The schema file is created in the project root, so move it
+        shutil.move(project_path / schema_file, project_output_dir / schema_file)
+        typer.echo(f"  - Generated OpenAPI schema: {project_output_dir / schema_file}")
+    except FileNotFoundError:
+        typer.echo(f"  - Failed to generate OpenAPI schema. Is 'manage.py' in the current directory?", err=True)
+    except subprocess.CalledProcessError as e:
+        typer.echo(f"  - Failed to generate OpenAPI schema. Error from spectacular:", err=True)
+        typer.echo(e.stderr, err=True)
 
-        # Generate OpenAPI schema
-        schema_file = "schema.yml"
-        schema_command = ["python", "manage.py", "spectacular", "--file", schema_file]
+    # Generate Postman collection
+    postman_file = "postman.json"
+    postman_command = ["python", "manage.py", "spectacular", "--postman", "--file", postman_file]
 
-        try:
-            subprocess.run(
-                schema_command,
-                cwd=project_path,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            shutil.move(project_path / schema_file, project_output_dir / schema_file)
-            typer.echo(f"  - Generated OpenAPI schema: {project_output_dir / schema_file}")
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            typer.echo(f"  - Failed to generate OpenAPI schema.")
-            if isinstance(e, subprocess.CalledProcessError):
-                typer.echo(f"    Error: {e.stderr}")
-
-        # Generate Postman collection
-        postman_file = "postman.json"
-        postman_command = ["python", "manage.py", "spectacular", "--postman", "--file", postman_file]
-
-        try:
-            subprocess.run(
-                postman_command,
-                cwd=project_path,
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            shutil.move(project_path / postman_file, project_output_dir / postman_file)
-            typer.echo(f"  - Generated Postman collection: {project_output_dir / postman_file}")
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            typer.echo(f"  - Failed to generate Postman collection.")
-            if isinstance(e, subprocess.CalledProcessError):
-                typer.echo(f"    Error: {e.stderr}")
+    try:
+        subprocess.run(
+            postman_command,
+            cwd=project_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        shutil.move(project_path / postman_file, project_output_dir / postman_file)
+        typer.echo(f"  - Generated Postman collection: {project_output_dir / postman_file}")
+    except FileNotFoundError:
+        typer.echo(f"  - Failed to generate Postman collection. Is 'manage.py' in the current directory?", err=True)
+    except subprocess.CalledProcessError as e:
+        typer.echo(f"  - Failed to generate Postman collection. Error from spectacular:", err=True)
+        typer.echo(e.stderr, err=True)
 
     typer.echo("\nDocumentation generation complete.")
 
