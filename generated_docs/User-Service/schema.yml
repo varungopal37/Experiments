@@ -1,0 +1,1 @@
+openapi: 3.0.0\ninfo:\n  title: My API\n  version: 1.0.0\npaths: {}
