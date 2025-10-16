@@ -1,8 +1,0 @@
-projects:
-- name: "User-Service"
-  path: "./test_projects/user-service"
-- name: "Product-API"
-  path: "./test_projects/product-api"
-- name: "Billing-Engine"
-  path: "./test_projects/billing-engine"
-output_dir: "./generated_docs"
